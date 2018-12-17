@@ -66,6 +66,10 @@
  */
 #define ACC_BOARD_CS		0
 
+/**
+ * @brief Number of GPIO pins
+ */
+#define GPIO_PIN_COUNT 28
 
 /**
  * @brief Sensor states
@@ -90,6 +94,7 @@ static const uint_fast8_t sensor_interrupt_pins[SENSOR_COUNT] = {
 
 static acc_board_isr_t master_isr;
 static acc_device_handle_t spi_handle;
+static gpio_t gpios[GPIO_PIN_COUNT] = { 0 };
 
 static void isr_sensor1(void) {if (master_isr) master_isr(1);}
 
@@ -113,7 +118,6 @@ static bool acc_board_all_sensors_inactive(void)
 
 acc_status_t acc_board_gpio_init(void)
 {
-	acc_status_t		status;
 	static bool		init_done = false;
 	static acc_os_mutex_t	init_mutex = NULL;
 
@@ -131,21 +135,21 @@ acc_status_t acc_board_gpio_init(void)
 	}
 
 	if (
-		(status = acc_device_gpio_set_initial_pull(GPIO0_PIN, 0)) ||
-		(status = acc_device_gpio_set_initial_pull(RSTn_PIN, 1)) ||
-		(status = acc_device_gpio_set_initial_pull(ENABLE_PIN, 0))
+		!acc_device_gpio_set_initial_pull(GPIO0_PIN, 0) ||
+		!acc_device_gpio_set_initial_pull(RSTn_PIN, 1) ||
+		!acc_device_gpio_set_initial_pull(ENABLE_PIN, 0)
 	) {
-		ACC_LOG_WARNING("%s: failed to set initial pull with status: %s", __func__, acc_log_status_name(status));
+		ACC_LOG_WARNING("%s: failed to set initial pull", __func__);
 	}
 
 	if (
-		(status = acc_device_gpio_input(GPIO0_PIN)) ||
-		(status = acc_device_gpio_write(RSTn_PIN, 0)) ||
-		(status = acc_device_gpio_write(ENABLE_PIN, 0))
+		!acc_device_gpio_input(GPIO0_PIN) ||
+		!acc_device_gpio_write(RSTn_PIN, 0) ||
+		!acc_device_gpio_write(ENABLE_PIN, 0)
 	) {
-		ACC_LOG_ERROR("%s failed with %s", __func__, acc_log_status_name(status));
+		ACC_LOG_ERROR("%s failed", __func__);
 		acc_os_mutex_unlock(init_mutex);
-		return status;
+		return ACC_STATUS_FAILURE;
 	}
 
 	init_done = true;
@@ -174,7 +178,7 @@ acc_status_t acc_board_init(void)
 		return ACC_STATUS_SUCCESS;
 	}
 
-	acc_driver_gpio_linux_sysfs_register(28);
+	acc_driver_gpio_linux_sysfs_register(GPIO_PIN_COUNT, gpios);
 	acc_driver_spi_linux_spidev_register();
 
 	acc_device_gpio_init();
@@ -208,18 +212,14 @@ acc_status_t acc_board_init(void)
  */
 static acc_status_t acc_board_reset_sensor(void)
 {
-	acc_status_t status;
-
-	status = acc_device_gpio_write(RSTn_PIN, 0);
-	if (status != ACC_STATUS_SUCCESS) {
+	if (!acc_device_gpio_write(RSTn_PIN, 0)) {
 		ACC_LOG_ERROR("Unable to activate RSTn");
-		return status;
+		return ACC_STATUS_FAILURE;
 	}
 
-	status = acc_device_gpio_write(ENABLE_PIN, 0);
-	if (status != ACC_STATUS_SUCCESS) {
+	if (!acc_device_gpio_write(ENABLE_PIN, 0)) {
 		ACC_LOG_ERROR("Unable to deactivate ENABLE");
-		return status;
+		return ACC_STATUS_FAILURE;
 	}
 
 	return ACC_STATUS_SUCCESS;
@@ -228,39 +228,34 @@ static acc_status_t acc_board_reset_sensor(void)
 
 acc_status_t acc_board_start_sensor(acc_sensor_t sensor)
 {
-	acc_status_t status;
-
 	if (sensor_state[sensor - 1] == SENSOR_STATE_BUSY) {
 		ACC_LOG_ERROR("Sensor %u already active.", sensor);
 		return ACC_STATUS_FAILURE;
 	}
 
 	if (acc_board_all_sensors_inactive()) {
-		status = acc_device_gpio_write(RSTn_PIN, 0);
-		if (status != ACC_STATUS_SUCCESS) {
+		if (!acc_device_gpio_write(RSTn_PIN, 0)) {
 			ACC_LOG_ERROR("Unable to activate RSTn");
 			acc_board_reset_sensor();
-			return status;
+			return ACC_STATUS_FAILURE;
 		}
 
 		// Wait for PMU to stabilize
 		acc_os_sleep_us(5000);
 
-		status = acc_device_gpio_write(ENABLE_PIN, 1);
-		if (status != ACC_STATUS_SUCCESS) {
+		if (!acc_device_gpio_write(ENABLE_PIN, 1)) {
 			ACC_LOG_ERROR("Unable to activate ENABLE");
 			acc_board_reset_sensor();
-			return status;
+			return ACC_STATUS_FAILURE;
 		}
 
 		// Wait for Power On Reset
 		acc_os_sleep_us(5000);
 
-		status = acc_device_gpio_write(RSTn_PIN, 1);
-		if (status != ACC_STATUS_SUCCESS) {
+		if (!acc_device_gpio_write(RSTn_PIN, 1)) {
 			ACC_LOG_ERROR("Unable to deactivate RSTn");
 			acc_board_reset_sensor();
-			return status;
+			return ACC_STATUS_FAILURE;
 		}
 
 		for (uint_fast8_t sensor_index = 0; sensor_index < SENSOR_COUNT; sensor_index++) {
@@ -321,12 +316,10 @@ bool acc_board_is_sensor_interrupt_connected(acc_sensor_t sensor)
 
 bool acc_board_is_sensor_interrupt_active(acc_sensor_t sensor)
 {
-	acc_status_t status;
 	uint_fast8_t value;
 
-	status = acc_device_gpio_read(sensor_interrupt_pins[sensor - 1], &value);
-	if (status != ACC_STATUS_SUCCESS) {
-		ACC_LOG_ERROR("Could not obtain GPIO interrupt value for sensor %" PRIsensor " with status: %s.", sensor, acc_log_status_name(status));
+	if (!acc_device_gpio_read(sensor_interrupt_pins[sensor - 1], &value)) {
+		ACC_LOG_ERROR("Could not obtain GPIO interrupt value for sensor %" PRIsensor ".", sensor);
 		return false;
 	}
 
@@ -336,22 +329,20 @@ bool acc_board_is_sensor_interrupt_active(acc_sensor_t sensor)
 
 acc_status_t acc_board_register_isr(acc_board_isr_t isr)
 {
-	acc_status_t status;
-
 	if (isr != NULL)
 	{
 		if (
-			(status = acc_device_gpio_register_isr(GPIO0_PIN, ACC_DEVICE_GPIO_EDGE_RISING, &isr_sensor1))
+			!acc_device_gpio_register_isr(GPIO0_PIN, ACC_DEVICE_GPIO_EDGE_RISING, &isr_sensor1)
 		) {
-			return status;
+			return ACC_STATUS_FAILURE;
 		}
 	}
 	else
 	{
 		if (
-			(status = acc_device_gpio_register_isr(GPIO0_PIN, ACC_DEVICE_GPIO_EDGE_NONE, NULL))
+			!acc_device_gpio_register_isr(GPIO0_PIN, ACC_DEVICE_GPIO_EDGE_NONE, NULL)
 		) {
-			return status;
+			return ACC_STATUS_FAILURE;
 		}
 	}
 
